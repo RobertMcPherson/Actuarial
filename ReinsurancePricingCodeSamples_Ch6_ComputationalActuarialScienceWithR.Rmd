@@ -1,0 +1,252 @@
+---
+title: 'Reinsurance Loss Analysis and Pricing: Code Samples'
+output:
+  html_notebook: default
+  html_document: default
+---
+These code samples are from Chapter Six of the text,  "Computational Actuarial Science with R."
+The data represent 2,167 fire losses collected by Copenhagen Reinsurance between 1980 and 1990.
+There is a package that contains all of the sample text, which can be loaded using the following R script.
+
+install.packages("CASdatasets", repos = "http://cas.uqam.ca/pub/R/", type="source")
+
+
+```{r}
+#install.packages("sp",dependencies=T) 
+#install.packages("CASdatasets", repos = "http://cas.uqam.ca/pub/R/", type="source")
+
+library(CASdatasets)
+#?CASdatasets
+data("danishuni")
+
+str(danishuni)
+summary(danishuni)
+```
+There are two columns.  The first one contains the dates, and the second one continas the loss amounts. There are 11 years of data, spanning from 1980, through 1990.
+
+There are two main means of identifying large losses: the block maxima approach, and the exceedance approach.  In these data, the block maxima is simply the maximum value in each year.  The exceedance amounts are those that would exceed a given threshold each year.
+
+```{r, echo=TRUE}
+danish.claim <- danishuni[,2] 
+years <- as.numeric(substr(danishuni[,1], 1, 4)) 
+danish.max <- aggregate(danish.claim, by=list(years), max, na.rm=TRUE)[,2]
+head(years)
+head(danish.max)
+```
+The four digit years are parsed form the longer date format, and are loaded into the "years" variable.  The maxiumum value in each year is loaded into the variable, "danish.max".
+
+
+```{r, echo=TRUE}
+u <- 10
+danish.exc <- danishuni[danishuni[,2] > u, 2]
+head(danish.exc)
+```
+The above R code shows how it is possible to retrieve exceedances above the threshold u = 10 for the Danish claim dataset. 
+
+##Visualizing Tails
+
+```{r, echo=TRUE}
+n.u <- length(danish.exc) 
+#surv.prob <- 1 - rank(danish.exc) #original text version...appears to be in error
+surv.prob <- 1 + n.u - rank(danish.exc) 
+
+```
+
+```{r, echo=TRUE}
+plot(danish.exc, surv.prob, xlab = "Exceedances", ylab = "Survival probability")
+
+```
+This scatterplot can be visualized in Figure 6.3. It is possible to add the (theoretical) survival probability from the Pareto distribution if the tail index ?? is estimated using least squares techniques: 
+```{r}
+plot(danish.exc, surv.prob, log="xy", xlab = "Exceedances", ylab = "Survival probability")
+#plot(danish.exc, surv.prob, xlab = "Exceedances", ylab = "Survival probability")
+alpha <- - cov(log(danish.exc), log(surv.prob))/var(log(danish.exc)) 
+x = seq(u, max(danish.exc), length = 100) 
+#y = (x/u)^(-alpha) #original code from text appears to be in error...y-intercept is too low
+y = (x/u)^(-alpha) * 100
+lines(x, y)
+
+```
+It is also possible to plot the cumulative distribution function, given that u is exceeded: 
+```{r}
+prob <- rank(danish.exc)/(n.u + 1) 
+plot(danish.exc, prob, log = "x", xlab= "Exceedances", ylab = "Probability of non exceedance") 
+y = 1 - (x/u)^(-alpha) 
+lines(x, y)
+
+```
+##Generalized Extreme Value Distribution
+
+The following R code computes the negative log-likelihood for the generalized extreme value distribution: 
+ 
+```{r}
+nllik.gev <- function(par, data){ 
+       mu <- par[1] 
+       sigma <- par[2] 
+       xi <- par[3] 
+    if ((sigma <= 0) | (xi <= -1)) 
+          return(1e6) 
+       n <- length(data) 
+       if (xi == 0) 
+          n * log(sigma) + sum((data - mu)/ sigma) + 
+             sum(exp(-(data - mu)/ sigma)) 
+       else { 
+          if (any((1 + xi * (data - mu)/ sigma) <= 0)) 
+             return(1e6) 
+          n * log(sigma) + (1 + 1/ xi) * 
+             sum(log(1 + xi * (data - mu)/ sigma)) + 
+             sum((1 + xi * (data - mu)/ sigma)^(-1/xi)) 
+  }
+}
+
+``` 
+Some care is needed when trying to optimize the generalized extreme value likelihood because the likelihood is typically erratic in regions far away from its global maximum and hence numerical optimization might fail. A reasonable strategy is to provide sensible starting values such as the moment estimates for the Gumbel distribution. The following R code does this job for the Danish claim dataset: 
+```{r}
+sigma.start <- sqrt(6) * sd(danish.max)/pi 
+mu.start <- mean(danish.max) + digamma(1) * sigma.start 
+fit.gev <- nlm(nllik.gev, c(mu.start, sigma.start, 0), hessian = TRUE, data = danish.max) 
+fit.gev
+
+```
+The maximum likelihood estimates can be obtained from fit$estimate and the associated standard errors from:
+
+```{r}
+sqrt(diag(solve(fit.gev$hessian))) #$
+
+```
+In particular, the maximum likelihood estimates (and the associated standard errors) are µ^ = 38 (11), ??^ = 29 (11), and ^?? = 0.64 (0.41).
+
+##Poisson-Generalized Pareto Model
+
+The following R code computes the negative log-likelihood for the generalized Pareto distribution:
+
+```{r}
+nllik.gp <- function(par, u, data){ 
+  tau <- par[1] 
+  xi <- par[2] 
+  
+  if ((tau <= 0) | (xi < -1)) 
+    return(1e6) 
+  
+  m <- length(data) 
+  
+  if (xi == 0) 
+    m * log(tau) + sum(data - u)/tau 
+  
+  else { 
+    if (any((1 + xi * (data - u)/tau) <= 0)) 
+      return(1e6) 
+    
+    m * log(tau) + (1 + 1/ xi) * 
+      sum(log(1 + xi * (data - u)/ tau)) 
+  } 
+}
+
+
+```
+The use of the generalized Pareto model for modeling exceedances is a two-step procedure. First, one must optimize the above likelihood and then estimate the rate of exceedances ??u, that is, ??u = P(X > u). For the Danish claim dataset, the likelihood is maximized by invoking
+
+```{r}
+u <- 10 
+tau.start <- mean(danish.exc) - u 
+fit.gp <- nlm(nllik.gp, c(tau.start, 0), u = u, hessian = TRUE, data = danish.exc) 
+fit.gp
+
+```
+where tau.start is the moment estimator of the exponential distribution. Independently, the rate parameter ??u is easily estimated by ^??u = m/n with associated standard error { ^??u(1 ??? ^??u)/n} 1/2. The estimates and related standard errors for the generalized Pareto can be obtained similarly to the generalized extreme value case, and we found ^??u = 0.050 (0.004), ??^ = 7 (1) and ^?? = 0.50 (0.14).
+
+Although from a theoretical point of view the shape parameters of the generalized extreme value and generalized Pareto distributions are the same, the estimates for ?? differ. It is also possible to use a profile likelihood technique because the main parameter of interest is ?? (see Venzon & Moolgavkar (1988)). Recall that if we consider a parametric model with parameter ?? = (??1, ??2), define `P (??1) = max ??2 `(??1, ??2). We can then compute the maximum of the profile log-likelihood ??b1 = argmax ??1 `P (??1) = argmax ??1 max ??2 `(??1, ??2).
+
+This maximum is not necessarily the same as the (global) maximum obtained by maximizing the likelihood, on a finite sample. Under standard suitable conditions, 2 n `P (??b1) ??? `P (??1) o d ?????? ?? 2 (dim(??1)), so it is possible to derive confidence intervals for ??b1. The code will be
+
+ . Computational Actuarial Science with R (Chapman & Hall/CRC The R Series) (Page 269). CRC Press. Kindle Edition. 
+
+```{r} 
+prof.nllik.gp <- function(par,xi, u, data) nllik.gp(c(par,xi), u, data) 
+prof.fit.gp <- function(x) -nlm(prof.nllik.gp, tau.start, xi = x, u = u, hessian = TRUE, data = danish.exc)$minimum 
+vxi = seq(0,1.8,by=.025) 
+prof.lik <- Vectorize(prof.fit.gp)(vxi) 
+plot(vxi, prof.lik, type="l", xlab = expression(xi), ylab = "Profile log-likelihood") 
+opt <- optimize(f = prof.fit.gp, interval=c(0,3), maximum=TRUE) 
+opt
+
+up <- opt$objective 
+abline(h = up, lty=2) 
+abline(h = up-qchisq(p = 0.95, df = 1), col = "grey") 
+I <- which(prof.lik >= up-qchisq(p = 0.95, df = 1)) 
+lines(vxi[I], rep(up-qchisq(p = 0.95, df = 1), length(I)), lwd = 5, col = "grey") 
+abline(v = range(vxi[I]), col = "grey", lty = 2) 
+abline(v = opt$maximum, col="grey")
+
+```
+##Point Process
+
+As alluded to previously, fitting the two-dimensional model better accounts for the uncertainty in estimating these parameters simultaneously.
+
+The following R code computes the negative log-likelihood for the Poisson point process model:
+
+ . Computational Actuarial Science with R (Chapman & Hall/CRC The R Series) (Page 269). CRC Press. Kindle Edition. 
+
+```{r}
+nllik.pp <- function(par, u, data, n.b){
+  mu <- par[1] 
+  sigma <- par[2] 
+  xi <- par[3] 
+  if ((sigma <= 0) | (xi <= -1)) 
+    return(1e6) 
+  if (xi == 0) 
+    poiss.meas <- n.b * exp(-(u - mu)/ sigma) 
+  else 
+    poiss.meas <- n.b * max(0, 1 + xi * (u - mu)/ sigma)^(-1/xi) 
+  exc <- data[data > u] 
+  m <- length(exc) 
+  if (xi == 0) 
+    poiss.meas + m * log(sigma) + sum((exc - mu)/ sigma) 
+  else { 
+    if (any((1 + xi * (exc - mu)/ sigma) <= 0)) 
+      return(1e6) 
+    poiss.meas + m * log(sigma) + (1 + 1/ xi) * 
+      sum(log(1 + xi * (exc - mu)/ sigma)) 
+  } 
+}
+
+```
+As previously, it is desirable to set suitable starting values. For the Poisson point process approach, the starting values are the same as for the generalized extreme value model. The Poisson point process model is fitted by invoking the following code:
+
+ . Computational Actuarial Science with R (Chapman & Hall/CRC The R Series) (Page 270). CRC Press. Kindle Edition. 
+ 
+```{r}
+n.b <- 1991 - 1980 
+u <- 10 
+sigma.start <- sqrt(6) * sd(danish.exc)/ pi 
+mu.start <- mean(danish.exc) + (log(n.b) + digamma(1)) * 
+  sigma.start
+fit.pp <- nlm(nllik.pp, c(mu.start, sigma.start, 0), u = u, hessian = TRUE, 
+              data = danishuni[,2], n.b = n.b) 
+fit.pp
+
+```
+The maximum likelihood estimates for the Danish claim dataset are ^µ = 40 (5), ??^ = 22 (6), and ^?? = 0.50 (0.14). Note that the shape parameter estimate ^?? is exactly the same as the one we get for the generalized Pareto approach. Further, ^?? and the generalized Pareto scale parameter estimate ^?? are connected by the relation ^?? = ^?? + ^??(u ??? µ^).
+
+ . Computational Actuarial Science with R (Chapman & Hall/CRC The R Series) (Page 271). CRC Press. Kindle Edition. 
+ 
+##Other Tail Index Estimates
+
+
+
+
+
+#Reinsurance Pricing
+NOTE: I JUMPED AHEAD TO THIS SECTION TO REREAD IT. THE CODE DOES NOT YET RUN, PROBABLY DUE TO R OBJECTS THAT NEED TO BE CREATED IN PREVIOUS SECTUIONS.  BETTER TO COMPLETE THE ABOVE BLANK SECTIONS FIRST, STARTING WITH "OTHER TAIL INDEX ESTIMATES", BEGINNING AFTER PAGE 271.
+
+Consider observations, over k years. In year i, ni losses were observed. For convenience, let Xi,1, · · ·, Xi,ni denote reported losses, for year (of occurrence) i. One can imagine some inflation index Ii, so that we have to replace original observations with adjusted (or normalized) losses I ???1 i Xi,k's. For instance, in Pielke et al. (2008), to adjust losses related to tropical cyclones (U.S. mainland damage), consider the I ???1 i function of the GNP inflation index, a wealth factor index, and an index to take into account coastal county population change. This index Ii can be visualized on Figure 6.11, with actual economic losses, on the left, and normalized losses, on the right.
+
+ . Computational Actuarial Science with R (Chapman & Hall/CRC The R Series) (Page 282). CRC Press. Kindle Edition. 
+```{r}
+plot(base$Base.Economic.Damage/1e9,type="h", 
+     ylab="Economic Damage",ylim=c(0,155))
+lines(base$Base.Economic.Damage/base$Normalized.PL05*100,lwd=2)  
+  
+plot(base$Normalized.PL05/1e9,type="h", ylab="Economic Damage (Normalized 2005)",ylim=c(0,155))
+
+```
